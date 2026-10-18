@@ -52,7 +52,7 @@ class Telegram:
             raise RuntimeError(f"Telegram sendDocument failed: {data.get('description')}")
 
     async def updates(self, offset: int | None, timeout: int = 50) -> list[dict]:
-        params = {"timeout": timeout, "allowed_updates": ["message"]}
+        params = {"timeout": timeout, "allowed_updates": ["message", "edited_message"]}
         if offset is not None:
             params["offset"] = offset
         return await self.call("getUpdates", http_timeout=timeout + 15, **params)

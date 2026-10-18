@@ -107,13 +107,13 @@ def evaluate(ev: Event, cfg: Config, now: datetime | None = None) -> tuple[str, 
 
     elif ev.kind == "tsunami":
         if ev.details.get("threat"):
-            pacific_watch = any(d <= 3000 or (ev.details.get("mentions_chile") and loc.country == "CL")
-                                for d, loc in dists) or ev.details.get("mentions_chile")
-            if pacific_watch:
-                chile = [l.name for l in cfg.locations if l.country == "CL"]
-                consider("critical", "tsunami threat possibly affecting " + (", ".join(chile) or "your locations"))
-            else:
-                consider("high", "tsunami threat (world)")
+            for d, loc in dists:
+                if d <= 3000 or (ev.details.get("mentions_chile") and loc.country == "CL"):
+                    if loc.coastal:
+                        consider("critical", f"tsunami threat for the coast at {loc.name}")
+                    else:
+                        consider("high", f"tsunami threat for the coast near {loc.name} ({loc.name} itself is inland)")
+            consider("high", "tsunami threat (world)")
 
     return best, reason
 

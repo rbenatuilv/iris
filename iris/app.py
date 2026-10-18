@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from . import __version__
-from .collectors import dpc, feeds, quakes
+from .collectors import civic, dpc, feeds, quakes
 from . import backup
 from .config import Config
 from .llm import LLM, BudgetExceeded, LLMError
@@ -45,7 +45,10 @@ class Iris:
         self.crashed: set[str] = set()
         self.llm = LLM(self.client, cfg.secrets.get("ANTHROPIC_API_KEY"), self.store, cfg)
         from .news import NewsPipeline
+        from .location import Tracker
         self.news = NewsPipeline(self)
+        self.here = Tracker(self)
+        self.here.apply()
         self._bg: set[asyncio.Task] = set()
 
     # ------------------------------------------------------------------ sources
@@ -60,8 +63,22 @@ class Iris:
             "meteoalarm": lambda: feeds.fetch_meteoalarm(self.client, cfg.raw),
             "openmeteo": lambda: feeds.fetch_openmeteo(self.client, cfg),
             "dpc": lambda: dpc.fetch_dpc(self.client, cfg, self.store),
-            "news": lambda: self.news.run_cycle(),
+            "strikes": lambda: civic.fetch_strikes(self.client, cfg),
+            "air": lambda: civic.fetch_air(self.client, cfg),
+            "news": self._news_cycle,
         }
+
+    async def _news_cycle(self) -> list[Event]:
+        events = await self.news.run_cycle()
+        limit = self.cfg.get("source_failure_alert_minutes", 120) * 60
+        for name, v in self.news.failing_feeds(limit).items():
+            if not v.get("notified"):
+                self.news.mark_feed_notified(name)
+                hours = (time.time() - v["since"]) / 3600
+                msg = (f"⚠️ News feed <b>{html.escape(name)}</b> has been failing for {hours:.1f} h: "
+                       f"{html.escape(v.get('err', ''))[:150]}")
+                await self.deliver_text("system:feed:" + name, "high", msg, msg)
+        return events
 
     async def _quakes(self, fetcher) -> list[Event]:
         reports = await fetcher(self.client)
@@ -79,6 +96,8 @@ class Iris:
                 events = await job()
                 self.store.source_ok(name, len(events))
                 await self.process(name, events)
+                if name == "ptwc":
+                    await self.close_missing("tsunami", {e.key for e in events if e.details.get("threat")})
             except Exception as e:  # noqa: BLE001 - a broken source must never kill the service
                 log.warning("source %s failed: %s", name, e)
                 row = self.store.source_fail(name, f"{type(e).__name__}: {e}")
@@ -146,6 +165,39 @@ class Iris:
         self.store.add_digest(key, level, digest_text, held=held)
         self.store.log_alert(key, level, "held" if held else "digest", digest_text)
         return "held" if held else "digest"
+
+    # ------------------------------------------------------------------ all clear
+    def _open_alerts(self, kind: str):
+        """Events of this kind that reached you as HIGH/CRITICAL (sent, or held for the digest) and aren't closed."""
+        closed = set(self.store.kv_get("closed_alerts", []) or [])
+        rows = self.store.db.execute(
+            "SELECT e.* FROM events e WHERE e.kind=? AND e.level IN ('high','critical') AND e.last_update > ? "
+            "AND EXISTS (SELECT 1 FROM alerts a WHERE a.event_key=e.key AND a.mode IN ('sent','held'))",
+            (kind, time.time() - 14 * 86400)).fetchall()
+        return [r for r in rows if r["key"] not in closed]
+
+    async def _send_all_clear(self, row, what: str) -> None:
+        closed = (self.store.kv_get("closed_alerts", []) or [])[-500:]
+        closed.append(row["key"])
+        self.store.kv_set("closed_alerts", closed)
+        text = f"✅ <b>{what}:</b> {html.escape(row['title'])} · #E{row['id']}"
+        try:
+            await self.tg.send(text, silent=True)
+            self.store.log_alert(row["key"], "info", "all-clear", text)
+        except Exception as e:  # noqa: BLE001
+            log.warning("all-clear send failed: %s", e)
+
+    async def close_expired_warnings(self) -> None:
+        now = datetime.now(timezone.utc)
+        for r in self._open_alerts("warning"):
+            exp = (json.loads(r["payload"] or "{}").get("details") or {}).get("expires")
+            if exp and datetime.fromisoformat(exp) < now:
+                await self._send_all_clear(r, "Over")
+
+    async def close_missing(self, kind: str, present: set[str]) -> None:
+        for r in self._open_alerts(kind):
+            if r["key"] not in present:
+                await self._send_all_clear(r, "Lifted" if kind == "tsunami" else "Over")
 
     # ------------------------------------------------------------------ AI extras
     CONTEXT_SYSTEM = ("You add context to an automatic hazard alert that was just sent to someone who lives in "
@@ -270,6 +322,10 @@ class Iris:
                 except Exception as e:  # noqa: BLE001
                     log.error("digest failed: %s", e)
             await self.maybe_backup(now)
+            await self.close_expired_warnings()
+            note = await self.here.expire_check()
+            if note:
+                await self.tg.send(note, silent=True)
             await self.flush_outbox()
             await asyncio.sleep(60)
 
@@ -308,6 +364,7 @@ class Iris:
             if "✅" not in status:
                 bad.append(name)
             lines.append(f"• {name}: {status}")
+        bad += [f"news:{k}" for k in self.news.failing_feeds()]
         if short:
             return "Sources: all OK ✅" if not bad else f"Sources with problems: {', '.join(bad)} (see /status)"
         return "\n".join(lines)
@@ -334,6 +391,8 @@ class Iris:
             "/digest — send the digest now\n"
             "/mute 2h — only critical alerts for a while (/unmute)\n"
             "/locations — monitored places\n"
+            "/here — the place that follows you (share live location to start) · /here off\n"
+            "/trip Lisbon [days] — watch a destination for a while · /trip off\n"
             "/test — send a test alert")
 
     async def handle(self, text: str) -> str | None:
@@ -406,6 +465,25 @@ class Iris:
             return "🔔 Unmuted."
         if cmd == "/locations":
             return "\n".join(f"• {l.name} ({l.country}) — profile {l.profile}" for l in self.cfg.locations)
+        if cmd == "/here":
+            if arg.lower() in ("off", "stop"):
+                self.here.stop()
+                return "📍 Stopped following your location. Your fixed places are still watched."
+            return self.here.describe()
+        if cmd == "/trip":
+            if not arg:
+                return "Usage: /trip Lisbon (7 days) · /trip Lisbon 3 · /trip off"
+            if arg.lower() in ("off", "stop"):
+                self.here.stop()
+                return "📍 Trip location removed."
+            m = re.match(r"^(.*?)(?:\s+(\d{1,2}))?$", arg)
+            place, days = m.group(1).strip(), int(m.group(2) or 7)
+            found = await self.here.geocode(place)
+            if not found:
+                return f"I couldn't find “{html.escape(place)}”. Try adding the country, e.g. /trip Porto, Portugal"
+            lat, lon, label = found
+            note = await self.here.update(lat, lon, "trip", time.time() + days * 86400)
+            return note or self.here.describe()
         if cmd == "/test":
             return "<b>🟠 HIGH · TEST</b>\nThis is a test alert. If you can read this, Iris can reach you. #E0"
         return "I don't know that command yet. /help lists what I can do. (Free-text questions arrive in phase 3.)"
@@ -420,13 +498,18 @@ class Iris:
                 for u in batch:
                     offset = u["update_id"] + 1
                     self.store.kv_set("tg_offset", offset)
-                    msg = u.get("message") or {}
+                    msg = u.get("message") or u.get("edited_message") or {}
                     chat = str((msg.get("chat") or {}).get("id", ""))
                     if chat != self.tg.chat_id:
                         log.warning("ignored message from unknown chat %s", chat)
                         continue
                     try:
-                        reply = await self.handle(msg.get("text") or "")
+                        if msg.get("location"):
+                            reply = await self.here.on_telegram_location(msg)
+                        elif "edited_message" in u:
+                            reply = None                      # edits of normal messages: ignore
+                        else:
+                            reply = await self.handle(msg.get("text") or "")
                     except Exception as e:  # noqa: BLE001
                         log.exception("command failed")
                         reply = f"Sorry, that failed: {html.escape(str(e))}"

@@ -44,6 +44,9 @@ class Location:
     country: str
     profile: str
     comune: str | None = None      # Italian municipality name, for zone-level civil protection alerts
+    coastal: bool = False          # tsunami threats are CRITICAL only for coastal places
+    region: str | None = None      # for regional strikes (Italy), e.g. Lombardia
+    province: str | None = None    # for local strikes (Italy), e.g. Milano
 
     @property
     def zone(self) -> ZoneInfo:
@@ -59,7 +62,14 @@ class Config:
 
     @property
     def tz(self) -> ZoneInfo:
+        """Your clock: the live location's timezone while travelling (if enabled), else the configured one."""
+        here = self.location("here")
+        if here and (self.raw.get("here") or {}).get("follow_timezone", True):
+            return ZoneInfo(here.tz)
         return ZoneInfo(self.raw.get("timezone", "UTC"))
+
+    def set_here(self, loc: "Location | None") -> None:
+        self.locations = [l for l in self.locations if l.id != "here"] + ([loc] if loc else [])
 
     def profile(self, name: str) -> dict:
         return self.raw["profiles"][name]

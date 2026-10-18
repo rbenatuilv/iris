@@ -8,8 +8,10 @@ Each zone lists its municipalities, so a location just names its comune (Milan â
 """
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from ..models import Event
@@ -53,7 +55,9 @@ def events_for(day: str, topo: dict, locations, bulletin_name: str, tz_default: 
     for loc in locations:
         if loc.country != "IT":
             continue
-        found = zone_levels(topo, getattr(loc, "comune", None) or loc.name)
+        if not getattr(loc, "comune", None):
+            continue
+        found = zone_levels(topo, loc.comune)
         if not found:
             continue
         zone, levels = found
@@ -108,22 +112,25 @@ async def fetch_dpc(client, cfg, store) -> list[Event]:
             t = await client.get(url, timeout=60)
             t.raise_for_status()
             topo = t.json()
-            # keep only what we need: the zones of our locations (the full file is ~1 MB)
-            slim = {"objects": {"z": {"geometries": []}}}
-            for loc in cfg.locations:
-                if loc.country == "IT":
-                    zl = zone_levels(topo, getattr(loc, "comune", None) or loc.name)
-                    if zl:
-                        zone, levels = zl
-                        props = {k: {"yellow": "GIALLA", "orange": "ARANCIONE", "red": "ROSSA"}.get(v, "NESSUNA")
-                                 for k, v in levels.items()}
-                        slim["objects"]["z"]["geometries"].append(
-                            {"properties": {"Nome zona": zone, "Comuni": [getattr(loc, "comune", None) or loc.name],
-                                            **props}})
-            days[(day0 + timedelta(days=offset)).isoformat()] = slim
+            # keep the zone table without geometry (~1/4 of the size) so any Italian comune can be looked up
+            slim = {"objects": {"z": {"geometries": [{"properties": g.get("properties", {})}
+                                                     for o in topo.get("objects", {}).values()
+                                                     for g in o.get("geometries", [])]}}}
+            day = (day0 + timedelta(days=offset)).isoformat()
+            path = cfg.home / "data" / f"dpc_{day}.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(slim, ensure_ascii=False))
+            days[day] = str(path)
+            for old in path.parent.glob("dpc_*.json"):          # keep only recent days
+                if old.stem[4:] < (day0 - timedelta(days=2)).isoformat():
+                    old.unlink(missing_ok=True)
         cache = {"name": head, "title": b.get("name", ""), "days": days}
         store.kv_set("dpc_cache", cache)
     out: list[Event] = []
-    for day, topo in (cache.get("days") or {}).items():
+    for day, path in (cache.get("days") or {}).items():
+        try:
+            topo = json.loads(Path(path).read_text()) if isinstance(path, str) else path
+        except OSError:
+            continue
         out += events_for(day, topo, cfg.locations, cache.get("title", ""))
     return out

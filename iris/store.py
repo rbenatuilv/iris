@@ -68,7 +68,10 @@ class Store:
                 cluster = r["cluster"]
                 break
         if cluster is None:
-            cluster = (self.db.execute("SELECT COALESCE(MAX(cluster),0)+1 FROM quake_reports").fetchone()[0])
+            # monotonic counter: never reuse a number, even after old reports are cleaned up
+            cluster = max(int(self.kv_get("quake_cluster_seq", 0) or 0),
+                          self.db.execute("SELECT COALESCE(MAX(cluster),0) FROM quake_reports").fetchone()[0]) + 1
+            self.kv_set("quake_cluster_seq", cluster)
         self.db.execute("INSERT INTO quake_reports VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                         (src_id, src, t, lat, lon, depth, mag, place, url, cluster, time.time()))
         return cluster, True

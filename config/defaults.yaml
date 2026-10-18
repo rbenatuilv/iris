@@ -17,6 +17,8 @@ locations:
     country: IT
     profile: home
     comune: Milano          # → civil protection zone "Nodo Idraulico di Milano"
+    region: Lombardia       # for regional/local transport strikes
+    province: Milano
   - id: santiago
     name: Santiago
     lat: -33.4489
@@ -31,6 +33,12 @@ locations:
     tz: America/Santiago
     country: CL
     profile: watch
+
+# The place that follows you (Telegram live location, a pin, or /trip). See /here.
+here:
+  profile: home            # same sensitivity as Milan
+  near_km: 25              # within this distance of a fixed place, the fixed place is enough
+  follow_timezone: true    # quiet hours and the digest follow your local time while travelling
 
 # Add more places here in local.yaml without repeating the list above:
 extra_locations: []
@@ -52,7 +60,7 @@ profiles:
       high:     [[5.5, 150], [6.5, 400]]
       info:     [[4.5, 150]]
     gdacs_radius_km: 400
-    forecast_level: high
+    forecast_level: info        # SENAPRED's official alerts cover Chile now; forecasts go to the digest
     forecast: {rain_mm: 60, gust_kmh: 90, tmax_c: 36, tmin_c: -6}
     news_radius_km: 60
     news: {critical: 5, high: 4, info: 3}
@@ -83,6 +91,8 @@ sources:           # polling intervals in seconds; set enabled: false to switch 
   meteoalarm: {enabled: true, interval: 600}
   openmeteo:  {enabled: true, interval: 10800}
   dpc:        {enabled: true, interval: 1800}   # Italian civil protection alert zones (yellow/orange/red)
+  strikes:    {enabled: true, interval: 21600}  # Italian transport strike calendar (MIT)
+  air:        {enabled: true, interval: 21600}  # air quality forecast (PM2.5)
   news:       {enabled: true, interval: 600}
 
 llm:
@@ -128,6 +138,15 @@ news:
       - {scope: milan, q: "(Milano OR Milan) sourcecountry:italy", lang: it}
       - {scope: chile, q: "(Santiago OR Talca OR Maule OR Chile) sourcelang:spanish", lang: es}
       - {scope: biobio, q: "domain:biobiochile.cl", lang: es}
+
+strikes:
+  days_ahead: 2            # tell me about strikes starting within 2 days
+  sectors: [trasporto pubblico locale, ferroviario, aereo, generale, plurisettoriale]
+  level_major: high        # your city's transport or nationwide general/rail strikes (held for the digest at night)
+
+air:
+  info_pm25: 75            # daily mean PM2.5 µg/m³ → digest   (Chile: 80 = alerta)
+  high_pm25: 110           # → alert                           (Chile: 110 = preemergencia)
 
 backup:
   enabled: true

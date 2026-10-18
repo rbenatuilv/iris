@@ -112,7 +112,11 @@ def test_policy_gdacs_tsunami(cfg):
     assert levels["gdacs:FL:2002"] == "high"         # orange near Talca
     assert levels["gdacs:EQ:3003"] == "none"
     p = feeds.parse_ptwc(PTWC_XML.format(t=iso(NOW)))[0]
-    assert policy.evaluate(p, cfg)[0] == "critical"
+    lvl, why = policy.evaluate(p, cfg)
+    assert lvl == "high" and "inland" in why             # Santiago/Talca are inland: no 3 a.m. siren
+    from iris.config import Location
+    cfg.locations.append(Location("valpo", "Valparaíso", -33.05, -71.62, "America/Santiago", "CL", "watch", coastal=True))
+    assert policy.evaluate(p, cfg)[0] == "critical"     # a coastal place is in danger
 
 
 def test_quiet_hours(cfg):
@@ -130,7 +134,7 @@ def test_forecast(cfg):
                       "wind_gusts_10m_max": [40, 95], "temperature_2m_max": [20, 22], "temperature_2m_min": [5, 6]}}
     evs = feeds.evaluate_forecast(data, loc, cfg.profile("watch"))
     assert {e.details["metric"] for e in evs} == {"rain", "gust"}
-    assert all(e.fixed_levels == {"talca": "high"} for e in evs)
+    assert all(e.fixed_levels == {"talca": "info"} for e in evs)   # SENAPRED covers official alerts
 
 
 # ---------------- end to end ----------------
