@@ -53,7 +53,10 @@ cd "$REPO" || exit 1
 git fetch -q origin main || { log "fetch failed"; exit 1; }
 LOCAL="$(git rev-parse HEAD)"; REMOTE="$(git rev-parse origin/main)"
 DEPLOYED="$(cat "$IRIS_HOME/.deployed_commit" 2>/dev/null || true)"
-if [ "$REMOTE" = "$DEPLOYED" ] && [ "${1:-}" != "--force" ]; then exit 0; fi
+if [ "${1:-}" != "--force" ]; then
+  [ "$REMOTE" = "$DEPLOYED" ] && exit 0
+  [ "$REMOTE" = "$(cat "$IRIS_HOME/.failed_commit" 2>/dev/null)" ] && exit 0   # known bad: wait for a newer one
+fi
 MSG="$(git log -1 --format=%s "$REMOTE")"
 log "updating to ${REMOTE:0:7}: $MSG"
 
@@ -64,6 +67,7 @@ cp -r iris config tests requirements.txt pytest.ini "$STAGE"/ 2>/dev/null
 "$VENV/bin/pip" install -q -r requirements.txt pytest respx >/dev/null 2>&1
 if ! (cd "$STAGE" && "$VENV/bin/python" -m pytest -q -x -p no:cacheprovider tests > "$STAGE/test.log" 2>&1); then
   log "tests failed, not deploying"; tail -20 "$STAGE/test.log"
+  echo "$REMOTE" > "$IRIS_HOME/.failed_commit"
   notify "⚠️ Iris update ${REMOTE:0:7} failed its tests and was NOT installed. Still running the previous version."
   [ -n "$DEPLOYED" ] && git reset -q --hard "$DEPLOYED"
   exit 1
@@ -95,6 +99,7 @@ else
   cp "$IRIS_HOME/.prev/config/defaults.yaml" "$IRIS_HOME/config/defaults.yaml"
   sudo -n /usr/bin/systemctl restart iris
   [ -n "$DEPLOYED" ] && git reset -q --hard "$DEPLOYED"
+  echo "$REMOTE" > "$IRIS_HOME/.failed_commit"
   notify "⚠️ Iris update ${REMOTE:0:7} crashed after install and was rolled back automatically."
   exit 1
 fi
