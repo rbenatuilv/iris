@@ -36,10 +36,37 @@ class Telegram:
             raise RuntimeError(f"Telegram {method} failed: {data.get('description')}")
         return data["result"]
 
-    async def send(self, text: str, chat_id: str | None = None, silent: bool = False) -> None:
-        for part in chunks(text):
-            await self.call("sendMessage", chat_id=chat_id or self.chat_id, text=part, parse_mode="HTML",
-                            disable_web_page_preview=True, disable_notification=silent)
+    async def send(self, text: str, chat_id: str | None = None, silent: bool = False, markup: dict | None = None):
+        parts = chunks(text)
+        res = None
+        for i, part in enumerate(parts):
+            extra = {"reply_markup": markup} if markup and i == len(parts) - 1 else {}
+            res = await self.call("sendMessage", chat_id=chat_id or self.chat_id, text=part, parse_mode="HTML",
+                                  disable_web_page_preview=True, disable_notification=silent, **extra)
+        return res
+
+    async def edit(self, message_id: int, text: str, markup: dict | None = None, chat_id: str | None = None):
+        try:
+            return await self.call("editMessageText", chat_id=chat_id or self.chat_id, message_id=message_id,
+                                   text=chunks(text)[0], parse_mode="HTML", disable_web_page_preview=True,
+                                   **({"reply_markup": markup} if markup else {}))
+        except RuntimeError as e:
+            if "not modified" in str(e):         # same filter tapped twice: nothing to change
+                return None
+            raise
+
+    async def edit_markup(self, message_id: int, markup: dict | None, chat_id: str | None = None):
+        return await self.call("editMessageReplyMarkup", chat_id=chat_id or self.chat_id, message_id=message_id,
+                               reply_markup=markup or {"inline_keyboard": []})
+
+    async def answer(self, callback_id: str, text: str = "") -> None:
+        try:
+            await self.call("answerCallbackQuery", callback_query_id=callback_id, text=text[:190])
+        except Exception:  # noqa: BLE001 - a stale button press must not break the loop
+            pass
+
+    async def set_commands(self, commands: list[tuple[str, str]]) -> None:
+        await self.call("setMyCommands", commands=[{"command": c, "description": d} for c, d in commands])
 
     async def send_document(self, path, caption: str = "", silent: bool = True) -> None:
         with open(path, "rb") as fh:
@@ -52,7 +79,7 @@ class Telegram:
             raise RuntimeError(f"Telegram sendDocument failed: {data.get('description')}")
 
     async def updates(self, offset: int | None, timeout: int = 50) -> list[dict]:
-        params = {"timeout": timeout, "allowed_updates": ["message", "edited_message"]}
+        params = {"timeout": timeout, "allowed_updates": ["message", "edited_message", "callback_query"]}
         if offset is not None:
             params["offset"] = offset
         return await self.call("getUpdates", http_timeout=timeout + 15, **params)

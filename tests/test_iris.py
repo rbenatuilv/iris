@@ -180,7 +180,8 @@ def test_end_to_end(cfg):
                 digest = app.build_digest()
                 assert "Orange Thunderstorm" in digest and "Held overnight" in digest and "active when Iris started" in digest
                 # Commands
-                assert "#E" in await app.handle("/recent")
+                text, kb = await app.handle("/recent")
+                assert "/e" in text and kb["inline_keyboard"]
                 assert "Thunderstorm" in await app.handle("/event 3") or "Usage" not in await app.handle("/event 1")
                 assert "Muted" in await app.handle("/mute 30m")
 

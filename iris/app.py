@@ -22,6 +22,7 @@ from .models import Event, level_rank, max_level
 from .policy import digest_line, evaluate, format_alert, in_quiet_hours
 from .store import Store
 from .telegram import Telegram
+from . import ui
 
 log = logging.getLogger("iris")
 UA = f"Iris/{__version__} (personal hazard monitor; contact via project owner)"
@@ -123,8 +124,11 @@ class Iris:
             if prev is None and level == "none":
                 continue                   # irrelevant: don't even store
             new_level = max_level(prev_level, level)
+            shown_reason = reason if level_rank(level) >= level_rank(prev_level) else (prev["reason"] if prev else reason)
             payload = {"sources": ev.sources, "url": ev.url, "details": ev.details, "magnitude": ev.magnitude,
-                       "time": ev.time.isoformat(), "kind": ev.kind}
+                       "time": ev.time.isoformat(), "kind": ev.kind, "fixed": ev.fixed_levels,
+                       "cat": ui.categorize(ev.kind, ev.key, ev.details),
+                       "area": ui.area_of(self.cfg, ev.fixed_levels, shown_reason)}
             eid = self.store.save_event(ev.key, ev.kind, ev.title, ev.lat, ev.lon, ev.time.timestamp(),
                                         new_level, reason if level_rank(level) >= level_rank(prev_level) else
                                         (prev["reason"] if prev else reason), payload)
@@ -134,8 +138,11 @@ class Iris:
                 if level_rank(level) >= level_rank("high"):
                     self.store.add_digest(ev.key, level, digest_line(ev, level, reason, self.cfg, eid) + " (active at start)", held=True)
                 continue
+            if ev.key in set(self.store.kv_get("muted_stories", []) or []):
+                continue                       # you asked for no more updates about this story
             text = format_alert(ev, level, reason, self.cfg, eid, update=prev_level != "none")
-            mode = await self.deliver_text(ev.key, level, text, digest_line(ev, level, reason, self.cfg, eid))
+            mode = await self.deliver_text(ev.key, level, text, digest_line(ev, level, reason, self.cfg, eid),
+                                           markup=ui.alert_keyboard(eid))
             if (mode == "sent" and ev.kind in ("quake", "tsunami", "gdacs") and "(world)" not in reason
                     and prev_level in ("none", "info") and (self.cfg.get("llm") or {}).get("context_followups", True)
                     and self.llm.enabled):
@@ -148,10 +155,10 @@ class Iris:
     def muted(self) -> bool:
         return time.time() < (self.store.kv_get("mute_until", 0) or 0)
 
-    async def deliver_text(self, key: str, level: str, text: str, digest_text: str) -> str:
+    async def deliver_text(self, key: str, level: str, text: str, digest_text: str, markup: dict | None = None) -> str:
         if level == "critical" or (level == "high" and not in_quiet_hours(self.cfg) and not self.muted()):
             try:
-                await self.tg.send(text)
+                await self.tg.send(text, markup=markup)
                 self.store.log_alert(key, level, "sent", text)
                 log.info("ALERT %s %s", level, key)
                 return "sent"
@@ -180,6 +187,8 @@ class Iris:
         closed = (self.store.kv_get("closed_alerts", []) or [])[-500:]
         closed.append(row["key"])
         self.store.kv_set("closed_alerts", closed)
+        if row["key"] in set(self.store.kv_get("muted_stories", []) or []):
+            return
         text = f"✅ <b>{what}:</b> {html.escape(row['title'])} · #E{row['id']}"
         try:
             await self.tg.send(text, silent=True)
@@ -305,7 +314,8 @@ class Iris:
         if overview:
             head, _, rest = text.partition("\n")
             text = f"{head}\n<i>{html.escape(overview)}</i>\n{rest}"
-        await self.tg.send(text, silent=True)
+        await self.tg.send(text, silent=True, markup={"inline_keyboard": [[
+            ui._btn("📋 Recent 24h", ui.encode({"h": 24, "a": "all", "c": "all", "l": "0"})), ui._btn("☰ Menu", "M")]]})
         self.store.mark_digest_sent()
 
     async def digest_loop(self) -> None:
@@ -385,8 +395,10 @@ class Iris:
 
     # ------------------------------------------------------------------ telegram commands
     HELP = ("<b>Iris commands</b>\n"
-            "/status — sources, quiet hours, mute\n"
-            "/recent [hours] — recent events (default 24 h)\n"
+            "/menu — buttons for everything\n"
+            "/recent — recent events grouped by place, with filter buttons. You can also type filters:\n"
+            "   /recent 3d · /recent crime · /recent chile alerts · /recent quakes world 7d · /recent critical\n"
+            "/status — sources, quiet hours, mute, AI spend\n"
             "/event N — details of event #EN\n"
             "/digest — send the digest now\n"
             "/mute 2h — only critical alerts for a while (/unmute)\n"
@@ -417,16 +429,11 @@ class Iris:
                      "", self.health_summary(), *self.news.health_lines()]
             return "\n".join(parts)
         if cmd == "/recent":
-            hours = float(arg) if re.fullmatch(r"\d+(\.\d+)?", arg) else 24
-            rows = self.store.recent_events(hours=hours, limit=25)
-            if not rows:
-                return f"Nothing relevant in the last {hours:g} h."
-            icon = {"critical": "🔴", "high": "🟠", "info": "🔵"}
-            def when(r):
-                return datetime.fromtimestamp(r["t"], self.cfg.tz).strftime("%a %d %b %H:%M") if r["t"] else "?"
-            return f"<b>Last {hours:g} h</b> (times are yours)\n" + "\n".join(
-                f"{icon.get(r['level'], '•')} <b>{html.escape(r['title'])}</b>\n    {html.escape(r['reason'] or '')}"
-                f" · {when(r)} · #E{r['id']}" for r in rows)
+            return ui.render_recent(self, ui.parse_recent_args(arg, self.cfg))
+        if cmd == "/menu":
+            return ui.menu()
+        if re.fullmatch(r"/e\d+", cmd):                # tappable /e12 links in lists
+            cmd, arg = "/event", cmd[2:]
         if cmd == "/event":
             m = re.search(r"\d+", arg)
             row = self.store.get_event_by_id(int(m.group())) if m else None
@@ -498,6 +505,9 @@ class Iris:
                 for u in batch:
                     offset = u["update_id"] + 1
                     self.store.kv_set("tg_offset", offset)
+                    if "callback_query" in u:
+                        await self.on_button(u["callback_query"])
+                        continue
                     msg = u.get("message") or u.get("edited_message") or {}
                     chat = str((msg.get("chat") or {}).get("id", ""))
                     if chat != self.tg.chat_id:
@@ -513,11 +523,70 @@ class Iris:
                     except Exception as e:  # noqa: BLE001
                         log.exception("command failed")
                         reply = f"Sorry, that failed: {html.escape(str(e))}"
-                    if reply:
+                    if isinstance(reply, tuple):
+                        await self.tg.send(reply[0], markup=reply[1])
+                    elif reply:
                         await self.tg.send(reply)
             except Exception as e:  # noqa: BLE001
                 log.warning("telegram poll error: %s", e)
                 await asyncio.sleep(10)
+
+    async def on_button(self, cq: dict) -> None:
+        """A tap on an inline button. Only your own chat is served."""
+        msg = cq.get("message") or {}
+        chat = str((msg.get("chat") or {}).get("id", ""))
+        if chat != self.tg.chat_id:
+            await self.tg.answer(cq.get("id", ""))
+            return
+        data, mid, toast = cq.get("data") or "", msg.get("message_id"), ""
+        try:
+            if data.startswith("r:"):
+                text, kb = ui.render_recent(self, ui.decode(data))
+                await self.tg.edit(mid, text, kb)
+            elif data.startswith("c:"):
+                _, h, a, l = data.split(":")
+                await self.tg.edit(mid, "<b>🗂 Choose a category</b>", ui.category_keyboard(int(h), a, l))
+            elif data == "M":
+                text, kb = ui.menu()
+                await self.tg.edit(mid, text, kb)
+            elif data.startswith("d:"):
+                await self.tg.send(await self.handle(f"/event {data[2:]}"))
+            elif data.startswith("m:"):
+                row = self.store.get_event_by_id(int(data[2:]))
+                if row:
+                    muted = (self.store.kv_get("muted_stories", []) or [])[-300:]
+                    if row["key"] not in muted:
+                        muted.append(row["key"])
+                    self.store.kv_set("muted_stories", muted)
+                    toast = "🔕 Muted: no more updates or all-clears about this story"
+                    await self.tg.edit_markup(mid, {"inline_keyboard": [[ui._btn("ℹ️ Details", f"d:{data[2:]}"),
+                                                                         ui._btn("🔕 Story muted", "noop")]]})
+            elif data.startswith("f:"):
+                _, eid, useful = data.split(":")
+                row = self.store.get_event_by_id(int(eid))
+                if row:
+                    self.store.db.execute("INSERT INTO feedback(event_key,useful,level,kind,created) VALUES(?,?,?,?,?)",
+                                          (row["key"], int(useful), row["level"], row["kind"], time.time()))
+                toast = "Thanks — noted 👍" if useful == "1" else "Thanks — noted 👎. I'll use this to tune alerts."
+                await self.tg.edit_markup(mid, {"inline_keyboard": [[ui._btn("ℹ️ Details", f"d:{eid}"),
+                                                                     ui._btn("🔕 Mute story", f"m:{eid}")],
+                                                                    [ui._btn("Feedback saved " + ("👍" if useful == "1" else "👎"), "noop")]]})
+            elif data == "s":
+                await self.tg.send(await self.handle("/status"))
+            elif data == "g":
+                await self.send_digest()
+            elif data == "h":
+                await self.tg.send(await self.handle("/here"))
+            elif data == "u":
+                toast = "🔕 Muted for 2 h (critical alerts still come through)"
+                await self.handle("/mute 2h")
+            elif data == "U":
+                toast = "🔔 Unmuted"
+                await self.handle("/unmute")
+        except Exception as e:  # noqa: BLE001
+            log.warning("button %s failed: %s", data, e)
+            toast = "Sorry, that didn't work."
+        await self.tg.answer(cq.get("id", ""), toast)
 
     # ------------------------------------------------------------------ main
     async def _guard(self, name: str, coro) -> None:
@@ -540,6 +609,10 @@ class Iris:
                                    silent=True)
             except Exception as e:  # noqa: BLE001
                 log.error("cannot reach Telegram at startup: %s", e)
+        try:
+            await self.tg.set_commands(ui.COMMANDS)
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not set the command list: %s", e)
         tasks = []
         for name, job in self.source_jobs().items():
             sc = self.cfg.source(name)

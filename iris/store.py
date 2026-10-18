@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS alerts (
 CREATE TABLE IF NOT EXISTS digest (
     id INTEGER PRIMARY KEY AUTOINCREMENT, event_key TEXT, level TEXT, text TEXT,
     held INTEGER, created REAL, sent INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, event_key TEXT, useful INTEGER, level TEXT, kind TEXT, created REAL);
 CREATE TABLE IF NOT EXISTS source_health (
     name TEXT PRIMARY KEY, last_ok REAL, last_err REAL, err_msg TEXT,
     consecutive_fail INTEGER DEFAULT 0, items INTEGER DEFAULT 0, notified INTEGER DEFAULT 0);
