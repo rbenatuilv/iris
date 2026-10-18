@@ -62,6 +62,8 @@ class Tracker:
                                 comune=s.get("comune"), coastal=False, region=s.get("region"),
                                 province=s.get("province"))
         self.cfg.set_here(here)
+        # precise position for "near you": live location or a pin, not a /trip (that's only a city)
+        self.cfg.me = (s["lat"], s["lon"]) if s and s.get("source") in ("live", "pin") else None
 
     # ------------------------------------------------------------ lookups
     async def _reverse(self, lat: float, lon: float) -> dict:
@@ -141,6 +143,7 @@ class Tracker:
     def stop(self) -> None:
         self.store.kv_set("here", None)
         self.cfg.set_here(None)
+        self.cfg.me = None
 
     async def expire_check(self) -> str | None:
         s = self.state()
@@ -161,4 +164,7 @@ class Tracker:
         age = (time.time() - s.get("updated", time.time())) / 60
         return (f"📍 <b>{s.get('name')}, {s.get('country')}</b>{near}\n"
                 f"Source: {s.get('source')} · last update {age:.0f} min ago · {until}\n"
-                f"Timezone: {s.get('tz')} (quiet hours follow it)\n/here off to stop.")
+                f"Timezone: {s.get('tz')} (quiet hours follow it)\n"
+                + (f"Near-you alerts: on (incidents within {self.lc.get('near_you_km', 1.5)} km are raised one level)\n"
+                   if s.get("source") in ("live", "pin") else "")
+                + "/here off to stop.")

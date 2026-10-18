@@ -59,6 +59,7 @@ class Config:
     home: Path
     locations: list[Location] = field(default_factory=list)
     secrets: dict[str, str] = field(default_factory=dict)
+    me: tuple[float, float] | None = None     # your precise position (live location / pin), for "near you"
 
     @property
     def tz(self) -> ZoneInfo:

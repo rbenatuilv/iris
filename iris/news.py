@@ -39,6 +39,7 @@ CREATE INDEX IF NOT EXISTS nc_update ON news_clusters(last_update);
 
 CATEGORIES = ["crime", "terrorism", "unrest", "strike_transport", "infrastructure", "fire", "weather",
               "geohazard", "accident", "health", "conflict", "other"]
+PRECISION = {"street": 0, "neighbourhood": 1, "city": 2, "region": 3}   # lower = more exact
 CATEGORY_LABEL = {"crime": "Crime", "terrorism": "Terrorism", "unrest": "Unrest", "strike_transport": "Strike / transport",
                   "infrastructure": "Infrastructure", "fire": "Fire", "weather": "Weather", "geohazard": "Natural hazard",
                   "accident": "Accident", "health": "Health", "conflict": "Conflict", "other": "Incident"}
@@ -227,6 +228,8 @@ For relevant items fill every field, in ENGLISH:
 - title_en: max 12 words, factual. summary_en: max 30 words: what, where, consequences so far.
 - place: most specific place (neighbourhood/street + city), country: ISO-3166 alpha-2.
 - lat/lon: your best approximate coordinates of that place (city centre if only the city is known).
+- precision: how exactly the text locates it: "street" (street, square, address, station), "neighbourhood"
+  (district / quarter / suburb), "city" (only the city), "region" (wider area). Never guess finer than the text says.
 - severity (local impact):
   1 minor (petty crime, small fire, minor accident, small demonstration)
   2 notable (armed robbery, serious injury, localized protest or traffic block, partial transit disruption)
@@ -247,6 +250,7 @@ TRIAGE_SCHEMA = {
             "title_en": {"type": "string"}, "summary_en": {"type": "string"},
             "place": {"type": "string"}, "country": {"type": "string"},
             "lat": {"type": ["number", "null"]}, "lon": {"type": ["number", "null"]},
+            "precision": {"type": "string", "enum": ["street", "neighbourhood", "city", "region"]},
             "severity": {"type": "integer", "minimum": 0, "maximum": 5},
             "world_significant": {"type": "boolean"}, "event_time": {"type": ["string", "null"]}},
         "required": ["id", "relevant"]}}},
@@ -259,7 +263,8 @@ reports come from a single outlet or anything is unclear. Decide:
   "unconfirmed" (plausible but only one source and nothing else found), "rejected" (false, old news, not an
   incident, or wrongly located).
 - Correct severity (same 1-5 scale: 1 minor, 2 notable, 3 significant, 4 major, 5 catastrophic), category,
-  place, coordinates.
+  the most specific place the reports give, its coordinates, and precision (street / neighbourhood / city /
+  region: never finer than the reports support).
 - still_ongoing: true if the situation is still developing or its effects still matter now (clashes continuing,
   road still closed, fire still burning, suspect at large). false if it is over and the reports are recaps,
   aftermath, arrests counts or reactions.
@@ -282,6 +287,7 @@ VERIFY_SCHEMA = {
         "title": {"type": "string"}, "summary": {"type": "string"}, "what_to_do": {"type": "string"},
         "place": {"type": "string"}, "country": {"type": "string"},
         "lat": {"type": ["number", "null"]}, "lon": {"type": ["number", "null"]},
+        "precision": {"type": "string", "enum": ["street", "neighbourhood", "city", "region"]},
         "independent_sources": {"type": "integer"}, "still_ongoing": {"type": "boolean"},
         "same_story_as": {"type": ["integer", "null"]}, "new_development": {"type": "boolean"},
         "reasoning": {"type": "string"}},
@@ -295,7 +301,7 @@ class NewsPipeline:
         self.store = app.store
         self.db = app.store.db
         self.db.executescript(SCHEMA)
-        for col in ("ended INTEGER DEFAULT 0", "indep INTEGER DEFAULT 0"):
+        for col in ("ended INTEGER DEFAULT 0", "indep INTEGER DEFAULT 0", "precision TEXT"):
             try:
                 self.db.execute(f"ALTER TABLE news_clusters ADD COLUMN {col}")
             except Exception:  # noqa: BLE001 - column already exists
@@ -495,13 +501,18 @@ class NewsPipeline:
                 self.db.execute("UPDATE news_clusters SET tokens=?, severity=?, world_significant=?, last_update=? WHERE id=?",
                                 (json.dumps(sorted(merged)[:300]), sev,
                                  int(bool(best["world_significant"]) or bool(t.get("world_significant"))), now, cid))
+                if lat is not None and PRECISION.get(t.get("precision"), 9) < PRECISION.get(best["precision"], 9):
+                    # this report pins the place down better ("in via Padova" vs "in Milan")
+                    self.db.execute("UPDATE news_clusters SET lat=?, lon=?, place=?, precision=? WHERE id=?",
+                                    (lat, lon, t.get("place") or best["place"], t.get("precision"), cid))
             else:
                 cur = self.db.execute(
                     "INSERT INTO news_clusters(category,title,summary,place,country,lat,lon,severity,world_significant,"
-                    "first_seen,first_published,last_update,tokens) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "first_seen,first_published,last_update,tokens,precision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (cat, t.get("title_en", r["title"]), t.get("summary_en", ""), t.get("place", ""),
                      (t.get("country") or "").upper(), lat, lon, t.get("severity") or 1,
-                     int(bool(t.get("world_significant"))), now, r["published"] or now, now, json.dumps(sorted(toks))))
+                     int(bool(t.get("world_significant"))), now, r["published"] or now, now, json.dumps(sorted(toks)),
+                     t.get("precision")))
                 cid = cur.lastrowid
             self.db.execute("UPDATE news_items SET cluster=? WHERE id=?", (cid, r["id"]))
             changed.add(cid)
@@ -525,6 +536,7 @@ class NewsPipeline:
                               "verified": c["verified"], "n_sources": len(domains), "what_to_do": c["what_to_do"] or "",
                               "links": dict(list(domains.items())[:5]), "cluster": cid,
                               "ended": bool(c["ended"]), "independent_sources": c["indep"] or 0,
+                              "precision": c["precision"],
                               "official": sorted({self.official[it["feed"]] for it in items if it["feed"] in self.official})})
 
     def _already_reported(self, c) -> list:
@@ -610,12 +622,12 @@ class NewsPipeline:
         self.db.execute(
             "UPDATE news_clusters SET verified=?, verified_at=?, verify_count=verify_count+1, severity=?, category=?, "
             "title=?, summary=?, what_to_do=?, place=COALESCE(NULLIF(?,''),place), country=COALESCE(NULLIF(?,''),country), "
-            "lat=COALESCE(?,lat), lon=COALESCE(?,lon), reasoning=? WHERE id=?",
+            "lat=COALESCE(?,lat), lon=COALESCE(?,lon), precision=COALESCE(?,precision), reasoning=? WHERE id=?",
             (v.get("status"), time.time(), int(v.get("severity") or c["severity"]),
              v.get("category") if v.get("category") in CATEGORIES else c["category"],
              v.get("title") or c["title"], v.get("summary") or c["summary"], v.get("what_to_do") or "",
              v.get("place") or "", (v.get("country") or "").upper(), v.get("lat"), v.get("lon"),
-             (v.get("reasoning") or "")[:500], cid))
+             v.get("precision") if v.get("lat") is not None else None, (v.get("reasoning") or "")[:500], cid))
         log.info("verified cluster %s: %s (sev %s, ongoing %s)", cid, v.get("status"), v.get("severity"),
                  v.get("still_ongoing"))
         return cid
@@ -642,8 +654,10 @@ class NewsPipeline:
             if ev.details["n_sources"] <= before:
                 return False, potential
         wait = self.ncfg.get("single_source_wait_minutes", 15) * 60
+        from .policy import distance_to_me
+        near_me = (distance_to_me(ev, self.cfg) or 1e9) <= float((self.cfg.get("here") or {}).get("near_you_km", 1.5))
         if (ev.details["n_sources"] < 2 and not ev.details.get("official") and (ev.details["severity"] or 0) < 4
-                and time.time() - c["first_seen"] < wait):
+                and not near_me and time.time() - c["first_seen"] < wait):
             return False, potential           # give other outlets a few minutes to report it
         return True, potential
 

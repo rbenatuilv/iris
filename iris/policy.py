@@ -19,6 +19,21 @@ def _quake_level(rules: dict, mag: float, dist: float) -> str:
     return "none"
 
 
+def fmt_km(d: float) -> str:
+    return f"{round(d * 1000, -2):.0f} m" if d < 1 else f"{d:.1f} km"
+
+
+def distance_to_me(ev: Event, cfg: Config) -> float | None:
+    """Distance from your precise current position (live location or pin), if known and the event is placed
+    precisely enough (street or neighbourhood) for the distance to mean something."""
+    me = getattr(cfg, "me", None)
+    if not me or ev.lat is None or ev.lon is None:
+        return None
+    if ev.kind == "news" and ev.details.get("precision") not in ("street", "neighbourhood"):
+        return None
+    return haversine_km(me[0], me[1], ev.lat, ev.lon)
+
+
 def evaluate(ev: Event, cfg: Config, now: datetime | None = None) -> tuple[str, str]:
     """Return (level, reason)."""
     now = now or datetime.now(timezone.utc)
@@ -89,6 +104,18 @@ def evaluate(ev: Event, cfg: Config, now: datetime | None = None) -> tuple[str, 
                     if lvl in nc and sev >= nc[lvl]:
                         consider(lvl, f"{d_.get('place') or 'elsewhere in ' + loc.country}")
                         break
+        # Near you right now: local incidents matter more within walking distance
+        dme = distance_to_me(ev, cfg)
+        hc = cfg.get("here") or {}
+        if dme is not None and sev >= 1:
+            if dme <= float(hc.get("near_you_km", 1.5)):
+                order = ["none", "info", "high", "critical"]
+                boosted = order[min(order.index(best) + 1, 3)]
+                if boosted == "critical" and sev < int(hc.get("near_you_critical_min_severity", 3)):
+                    boosted = "high"
+                best, reason = boosted, f"{fmt_km(dme)} from you"
+            elif dme <= float(hc.get("mention_km", 3)) and best != "none":
+                reason = f"{reason} · {fmt_km(dme)} from you".strip(" ·")
         if d_.get("world_significant"):
             nw = cfg.get("news_world", {})
             for lvl in ("high", "info"):

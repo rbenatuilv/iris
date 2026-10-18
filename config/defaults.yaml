@@ -39,6 +39,9 @@ here:
   profile: home            # same sensitivity as Milan
   near_km: 25              # within this distance of a fixed place, the fixed place is enough
   follow_timezone: true    # quiet hours and the digest follow your local time while travelling
+  near_you_km: 1.5         # live location: incidents this close to you are raised one level ("800 m from you")
+  mention_km: 3            # ...and within this distance the alert says how far from you it is
+  near_you_critical_min_severity: 3   # the boost reaches CRITICAL only for significant incidents (3+)
 
 # Add more places here in local.yaml without repeating the list above:
 extra_locations: []
