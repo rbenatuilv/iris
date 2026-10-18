@@ -16,6 +16,7 @@ from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 
 import defusedxml.ElementTree as ET
+from html.parser import HTMLParser
 
 from .llm import LLM, BudgetExceeded, LLMError
 from .models import Event, haversine_km, level_rank
@@ -145,6 +146,56 @@ def parse_feed(xml: str) -> list[dict]:
     return out
 
 
+class _TgParser(HTMLParser):
+    """Reads the public web view of a Telegram channel (https://t.me/s/<channel>)."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.posts: list[dict] = []
+        self._cur = None
+        self._depth = 0          # div depth inside the current text block
+        self._in_text = False
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        cls = a.get("class") or ""
+        if tag == "div" and "tgme_widget_message " in cls + " " and a.get("data-post"):
+            self._cur = {"post": a["data-post"], "text": "", "time": None}
+            self.posts.append(self._cur)
+        elif self._cur is not None and tag == "div" and "tgme_widget_message_text" in cls and not self._in_text:
+            self._in_text, self._depth = True, 1
+        elif self._in_text and tag == "div":
+            self._depth += 1
+        elif self._in_text and tag == "br":
+            self._cur["text"] += "\n"
+        elif self._cur is not None and tag == "time" and a.get("datetime") and self._cur["time"] is None:
+            self._cur["time"] = a["datetime"]
+
+    def handle_endtag(self, tag):
+        if self._in_text and tag == "div":
+            self._depth -= 1
+            if self._depth == 0:
+                self._in_text = False
+
+    def handle_data(self, data):
+        if self._in_text and self._cur is not None:
+            self._cur["text"] += data
+
+
+def parse_telegram_channel(html_text: str, channel: str) -> list[dict]:
+    p = _TgParser()
+    p.feed(html_text)
+    out = []
+    for post in p.posts:
+        text = re.sub(r"[ \t]+", " ", post["text"]).strip()
+        ts = _parse_date(post["time"]) if post["time"] else None
+        if not text or ts is None:
+            continue                # video-only posts etc.
+        first = text.split("\n", 1)[0]
+        out.append({"title": first[:200], "summary": text[:600], "url": f"https://t.me/{post['post']}",
+                    "published": ts, "domain": f"t.me/{channel}"})
+    return out
+
+
 def parse_gdelt(data: dict) -> list[dict]:
     out = []
     for a in data.get("articles", []) or []:
@@ -249,6 +300,7 @@ class NewsPipeline:
                 pass
         self.llm: LLM = app.llm
         self.ncfg = self.cfg.get("news", {}) or {}
+        self.official = {f["id"]: f.get("authority", f["id"]) for f in self.ncfg.get("feeds", []) if f.get("official")}
 
     # ------------------------------------------------------------ ingest
     async def fetch_all(self) -> tuple[list[dict], dict]:
@@ -257,9 +309,14 @@ class NewsPipeline:
 
         async def one(f):
             try:
-                r = await self.app.client.get(f["url"])
-                r.raise_for_status()
-                items = parse_feed(r.content)
+                if f.get("type") == "telegram":
+                    r = await self.app.client.get(f"https://t.me/s/{f['channel']}")
+                    r.raise_for_status()
+                    items = parse_telegram_channel(r.text, f["channel"])
+                else:
+                    r = await self.app.client.get(f["url"])
+                    r.raise_for_status()
+                    items = parse_feed(r.content)
                 for it in items:
                     it.update(feed=f["id"], scope=f.get("scope", "world"), lang=f.get("lang", ""))
                 health[f["id"]] = {"ok": True, "n": len(items), "t": time.time()}
@@ -321,7 +378,7 @@ class NewsPipeline:
             title, summary = it.get("title", ""), it.get("summary", "")
             if pub < now - max_age or (baseline and pub < now - 2 * 3600):
                 status = "old"
-            elif not prefilter(title, summary, it.get("lang", "")):
+            elif it["feed"] not in self.official and not prefilter(title, summary, it.get("lang", "")):
                 status = "filtered"
             else:
                 status = "new"
@@ -439,7 +496,8 @@ class NewsPipeline:
                               "place": c["place"], "country": c["country"], "world_significant": bool(c["world_significant"]),
                               "verified": c["verified"], "n_sources": len(domains), "what_to_do": c["what_to_do"] or "",
                               "links": dict(list(domains.items())[:5]), "cluster": cid,
-                              "ended": bool(c["ended"]), "independent_sources": c["indep"] or 0})
+                              "ended": bool(c["ended"]), "independent_sources": c["indep"] or 0,
+                              "official": sorted({self.official[it["feed"]] for it in items if it["feed"] in self.official})})
 
     def _already_reported(self, c) -> list:
         """Recent clusters near this one that the owner has already seen (alert or digest)."""
@@ -486,7 +544,11 @@ class NewsPipeline:
             user += "\n\nAlready reported to the owner (last 48 h, same area):\n" + "\n".join(
                 f"#{k['id']}: {k['title']} — {k['summary'][:200]} (first seen "
                 f"{datetime.fromtimestamp(k['first_seen'], self.cfg.tz):%a %H:%M})" for k in known)
-        search = 1 if n_domains < 2 else 0          # our own feeds already corroborate it: no search needed
+        official = sorted({self.official[it["feed"]] for it in items if it["feed"] in self.official})
+        search = 1 if n_domains < 2 and not official else 0   # corroborated or official: no search needed
+        if official:
+            user += (f"\n\nIncludes an OFFICIAL statement by {', '.join(official)} (the competent authority): treat the "
+                     "facts it states as confirmed; judge relevance, place, severity and whether it is still ongoing.")
         model = self.llm.critical_verify_model if potential == "critical" else self.llm.verify_model
         self.store.kv_set(f"verified_domains:{cid}", n_domains)
         v = await self.llm.structured(model=model,
@@ -537,7 +599,8 @@ class NewsPipeline:
             if ev.details["n_sources"] <= before:
                 return False, potential
         wait = self.ncfg.get("single_source_wait_minutes", 15) * 60
-        if ev.details["n_sources"] < 2 and (ev.details["severity"] or 0) < 4 and time.time() - c["first_seen"] < wait:
+        if (ev.details["n_sources"] < 2 and not ev.details.get("official") and (ev.details["severity"] or 0) < 4
+                and time.time() - c["first_seen"] < wait):
             return False, potential           # give other outlets a few minutes to report it
         return True, potential
 

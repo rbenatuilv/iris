@@ -157,8 +157,10 @@ def format_alert(ev: Event, level: str, reason: str, cfg: Config, event_id: int,
         lines.append("📍 " + e(place + (" — " if place and reason else "") + (reason or "")))
         lines.append("🕒 " + _fmt_time(ev, cfg, reason))
         n = max(d_.get("n_sources", len(ev.sources)), d_.get("independent_sources") or 0)
-        lines.append(("✅ Confirmed" if d_.get("verified") == "confirmed" else "⚠️ Unconfirmed")
-                     + f" · {n} source{'s' if n != 1 else ''}")
+        status = "✅ Confirmed" if d_.get("verified") == "confirmed" else "⚠️ Unconfirmed"
+        if d_.get("official"):
+            status = "🏛 Official: " + ", ".join(d_["official"])
+        lines.append(status + f" · {n} source{'s' if n != 1 else ''}")
         if d_.get("what_to_do"):
             lines.append("➡️ " + e(d_["what_to_do"]))
         links = d_.get("links") or {}

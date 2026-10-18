@@ -43,6 +43,7 @@ class Location:
     tz: str
     country: str
     profile: str
+    comune: str | None = None      # Italian municipality name, for zone-level civil protection alerts
 
     @property
     def zone(self) -> ZoneInfo:

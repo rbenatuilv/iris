@@ -16,6 +16,7 @@ locations:
     tz: Europe/Rome
     country: IT
     profile: home
+    comune: Milano          # → civil protection zone "Nodo Idraulico di Milano"
   - id: santiago
     name: Santiago
     lat: -33.4489
@@ -69,6 +70,9 @@ meteoalarm:
   - feed: italy
     areas: [Lombardia]
     location: milan
+    # Region-wide (Lombardy includes the Alps): digest only. Rain/flood/thunderstorm come zone-level from DPC.
+    max_level: info
+    skip_events: [thunderstorm, rain, flood]
 
 sources:           # polling intervals in seconds; set enabled: false to switch one off
   usgs:       {enabled: true, interval: 60}
@@ -78,6 +82,7 @@ sources:           # polling intervals in seconds; set enabled: false to switch 
   ptwc:       {enabled: true, interval: 120}
   meteoalarm: {enabled: true, interval: 600}
   openmeteo:  {enabled: true, interval: 10800}
+  dpc:        {enabled: true, interval: 1800}   # Italian civil protection alert zones (yellow/orange/red)
   news:       {enabled: true, interval: 600}
 
 llm:
@@ -106,6 +111,8 @@ news:
     - {id: latercera, url: "https://www.latercera.com/arc/outboundfeeds/rss/?outputType=xml", lang: es, scope: CL}
     - {id: cooperativa, url: "https://www.cooperativa.cl/noticias/site/tax/port/all/rss_3___1.xml", lang: es, scope: CL}
     # BioBioChile has no public RSS any more: it comes through GDELT (see below)
+    # SENAPRED (Chile's disaster agency) official channel: evacuations, alerts, earthquakes. Official = no second source needed.
+    - {id: senapred, type: telegram, channel: SenapredChile, lang: es, scope: CL, official: true, authority: SENAPRED}
     - {id: diarioelcentro, url: "https://www.diarioelcentro.cl/feed/", lang: es, scope: talca}
     - {id: diariotalca, url: "https://www.diariotalca.cl/feed/", lang: es, scope: talca}
     # World
@@ -121,6 +128,12 @@ news:
       - {scope: milan, q: "(Milano OR Milan) sourcecountry:italy", lang: it}
       - {scope: chile, q: "(Santiago OR Talca OR Maule OR Chile) sourcelang:spanish", lang: es}
       - {scope: biobio, q: "domain:biobiochile.cl", lang: es}
+
+backup:
+  enabled: true
+  time: "03:30"            # nightly, kept on the Pi in ~/iris/data/backups
+  keep: 7
+  telegram_weekday: sun    # weekly copy sent to your Telegram chat (off-device)
 
 # Only alert for events that happened recently (avoids old items after a restart)
 max_event_age_hours: 6

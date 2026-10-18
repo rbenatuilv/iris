@@ -41,6 +41,16 @@ class Telegram:
             await self.call("sendMessage", chat_id=chat_id or self.chat_id, text=part, parse_mode="HTML",
                             disable_web_page_preview=True, disable_notification=silent)
 
+    async def send_document(self, path, caption: str = "", silent: bool = True) -> None:
+        with open(path, "rb") as fh:
+            r = await self.client.post(f"{self.base}/sendDocument", timeout=120,
+                                       data={"chat_id": self.chat_id, "caption": caption,
+                                             "disable_notification": str(silent).lower()},
+                                       files={"document": (getattr(path, "name", str(path)).split("/")[-1], fh)})
+        data = r.json()
+        if not data.get("ok"):
+            raise RuntimeError(f"Telegram sendDocument failed: {data.get('description')}")
+
     async def updates(self, offset: int | None, timeout: int = 50) -> list[dict]:
         params = {"timeout": timeout, "allowed_updates": ["message"]}
         if offset is not None:

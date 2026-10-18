@@ -142,7 +142,8 @@ SEVERITY_LEVEL = {"moderate": "info", "severe": "high", "extreme": "critical"}
 COLOR = {"moderate": "Yellow", "severe": "Orange", "extreme": "Red"}
 
 
-def parse_meteoalarm(xml: str, areas: list[str], location_id: str) -> list[Event]:
+def parse_meteoalarm(xml: str, areas: list[str], location_id: str, max_level: str = "critical",
+                     skip_events: list[str] | None = None) -> list[Event]:
     root = ET.fromstring(xml)
     wanted = [a.lower() for a in areas]
     out = []
@@ -158,6 +159,10 @@ def parse_meteoalarm(xml: str, areas: list[str], location_id: str) -> list[Event
             continue
         sev = c.get("severity", "").lower()
         level = SEVERITY_LEVEL.get(sev)
+        if any(re.search(p, c.get("event", ""), re.I) for p in (skip_events or [])):
+            continue                       # covered by a more precise source
+        if level and ["info", "high", "critical"].index(level) > ["info", "high", "critical"].index(max_level):
+            level = max_level
         expires = _dt(c.get("expires", ""))
         if not level or (expires and expires < now):
             continue
@@ -178,7 +183,8 @@ async def fetch_meteoalarm(client, cfg) -> list[Event]:
     for m in cfg.get("meteoalarm", []) or []:
         r = await client.get(MA_URL.format(feed=m["feed"]))
         r.raise_for_status()
-        out += parse_meteoalarm(r.text, m["areas"], m["location"])
+        out += parse_meteoalarm(r.text, m["areas"], m["location"], m.get("max_level", "critical"),
+                                m.get("skip_events"))
     return out
 
 

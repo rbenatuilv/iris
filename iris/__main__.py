@@ -1,4 +1,4 @@
-"""iris run | selftest | test-alert | digest-preview"""
+"""iris run | selftest | test-alert | digest-preview | backup [--help]"""
 from __future__ import annotations
 
 import asyncio
@@ -102,6 +102,15 @@ def main() -> int:
         return asyncio.run(selftest(cfg))
     if cmd == "test-alert":
         return asyncio.run(test_alert(cfg))
+    if cmd == "backup":
+        if "--help" in sys.argv:
+            from . import backup as b
+            print(b.__doc__)
+            return 0
+        from .backup import make_backup
+        path = make_backup(cfg.db_path, cfg.home, int((cfg.get("backup") or {}).get("keep", 7)))
+        print(f"Backup written: {path}")
+        return 0
     if cmd == "digest-preview":
         return asyncio.run(digest_preview(cfg))
     print(__doc__)

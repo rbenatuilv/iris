@@ -14,7 +14,8 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from . import __version__
-from .collectors import feeds, quakes
+from .collectors import dpc, feeds, quakes
+from . import backup
 from .config import Config
 from .llm import LLM, BudgetExceeded, LLMError
 from .models import Event, level_rank, max_level
@@ -58,6 +59,7 @@ class Iris:
             "ptwc": lambda: feeds.fetch_ptwc(self.client),
             "meteoalarm": lambda: feeds.fetch_meteoalarm(self.client, cfg.raw),
             "openmeteo": lambda: feeds.fetch_openmeteo(self.client, cfg),
+            "dpc": lambda: dpc.fetch_dpc(self.client, cfg, self.store),
             "news": lambda: self.news.run_cycle(),
         }
 
@@ -267,8 +269,27 @@ class Iris:
                     self.news.cleanup()
                 except Exception as e:  # noqa: BLE001
                     log.error("digest failed: %s", e)
+            await self.maybe_backup(now)
             await self.flush_outbox()
             await asyncio.sleep(60)
+
+    async def maybe_backup(self, now: datetime) -> None:
+        bc = self.cfg.get("backup") or {}
+        if not bc.get("enabled", True):
+            return
+        hh, mm = map(int, bc.get("time", "03:30").split(":"))
+        today = now.date().isoformat()
+        if (now.hour, now.minute) < (hh, mm) or self.store.kv_get("last_backup") == today:
+            return
+        self.store.kv_set("last_backup", today)
+        try:
+            path = await asyncio.to_thread(backup.make_backup, self.cfg.db_path, self.cfg.home, int(bc.get("keep", 7)), now)
+            log.info("backup written: %s", path)
+            if now.strftime("%a").lower()[:3] == str(bc.get("telegram_weekday", "sun")).lower()[:3]:
+                await self.tg.send_document(path, caption=f"🗄 Weekly Iris backup ({path.stat().st_size // 1024} KB). "
+                                                          "Keep it; restore steps: iris backup --help")
+        except Exception as e:  # noqa: BLE001
+            log.error("backup failed: %s", e)
 
     # ------------------------------------------------------------------ health
     def health_summary(self, short: bool = False) -> str:
