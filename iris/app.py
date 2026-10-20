@@ -50,6 +50,9 @@ class Iris:
         self.news = NewsPipeline(self)
         self.here = Tracker(self)
         self.here.apply()
+        from .prefs import Prefs
+        self.prefs = Prefs(self)
+        self.prefs.apply()                 # your plain-text settings, on top of the config (also re-applies 'here')
         self._bg: set[asyncio.Task] = set()
 
     # ------------------------------------------------------------------ sources
@@ -319,8 +322,8 @@ class Iris:
         self.store.mark_digest_sent()
 
     async def digest_loop(self) -> None:
-        hh, mm = map(int, self.cfg.get("digest_time", "07:30").split(":"))
         while True:
+            hh, mm = map(int, self.cfg.get("digest_time", "07:30").split(":"))     # can change via /prefs
             now = datetime.now(self.cfg.tz)
             today = now.date().isoformat()
             if (now.hour, now.minute) >= (hh, mm) and self.store.kv_get("last_digest") != today:
@@ -336,6 +339,8 @@ class Iris:
             note = await self.here.expire_check()
             if note:
                 await self.tg.send(note, silent=True)
+            for ended in self.prefs.expire():
+                await self.tg.send(f"⏱ Temporary setting ended: {ended}", silent=True)
             await self.flush_outbox()
             await asyncio.sleep(60)
 
@@ -399,6 +404,8 @@ class Iris:
             "/recent — recent events grouped by place, with filter buttons. You can also type filters:\n"
             "   /recent 3d · /recent crime · /recent chile alerts · /recent quakes world 7d · /recent critical\n"
             "/status — sources, quiet hours, mute, AI spend\n"
+            "/prefs — your settings. To change them just write, e.g. “follow weather more closely in Milan”, "
+            "“fewer world alerts”, “rain alerts above 30 mm”, “quiet hours 00:00–08:00”, “also watch Rome”\n"
             "/event N — details of event #EN\n"
             "/digest — send the digest now\n"
             "/mute 2h — only critical alerts for a while (/unmute)\n"
@@ -432,6 +439,10 @@ class Iris:
             return ui.render_recent(self, ui.parse_recent_args(arg, self.cfg))
         if cmd == "/menu":
             return ui.menu()
+        if cmd in ("/prefs", "/settings"):
+            return self.prefs.listing()
+        if not text.strip().startswith("/") and text.strip():
+            return await self.prefs.handle_text(text.strip()[:500])
         if re.fullmatch(r"/e\d+", cmd):                # tappable /e12 links in lists
             cmd, arg = "/event", cmd[2:]
         if cmd == "/event":
@@ -571,6 +582,21 @@ class Iris:
                 await self.tg.edit_markup(mid, {"inline_keyboard": [[ui._btn("ℹ️ Details", f"d:{eid}"),
                                                                      ui._btn("🔕 Mute story", f"m:{eid}")],
                                                                     [ui._btn("Feedback saved " + ("👍" if useful == "1" else "👎"), "noop")]]})
+            elif data.startswith("p:"):
+                parts = data.split(":")
+                if parts[1] == "a":
+                    await self.tg.edit(mid, self.prefs.confirm(parts[2]))
+                elif parts[1] == "x":
+                    await self.tg.edit(mid, "❌ Cancelled. Nothing changed.")
+                elif parts[1] == "u":
+                    toast = self.prefs.undo(int(parts[2]))[:180]
+                    res = self.prefs.listing()
+                    await self.tg.edit(mid, *(res if isinstance(res, tuple) else (res,)))
+                elif parts[1] == "U":
+                    await self.tg.edit(mid, self.prefs.undo(None))
+            elif data == "P":
+                res = self.prefs.listing()
+                await self.tg.edit(mid, *(res if isinstance(res, tuple) else (res,)))
             elif data == "s":
                 await self.tg.send(await self.handle("/status"))
             elif data == "g":

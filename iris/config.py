@@ -60,6 +60,9 @@ class Config:
     locations: list[Location] = field(default_factory=list)
     secrets: dict[str, str] = field(default_factory=dict)
     me: tuple[float, float] | None = None     # your precise position (live location / pin), for "near you"
+    base_raw: dict = field(default_factory=dict)          # defaults + local.yaml, before your plain-text prefs
+    base_locations: list[Location] = field(default_factory=list)
+    prefs: list[dict] = field(default_factory=list)       # active preferences (see prefs.py)
 
     @property
     def tz(self) -> ZoneInfo:
@@ -102,4 +105,6 @@ def load_config(home: Path | None = None) -> Config:
     for k in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "HEALTHCHECK_URL", "ANTHROPIC_API_KEY"):
         if os.environ.get(k):
             secrets[k] = os.environ[k]
-    return Config(raw=raw, home=home, locations=locs, secrets=secrets)
+    import copy
+    return Config(raw=raw, home=home, locations=locs, secrets=secrets, base_raw=copy.deepcopy(raw),
+                  base_locations=list(locs))

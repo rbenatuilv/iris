@@ -237,7 +237,7 @@ def menu() -> tuple[str, dict]:
           [_btn("🟠 Alerts only (3d)", encode({"h": 72, "a": "all", "c": "all", "l": "h"})),
            _btn("📍 Here", "h")],
           [_btn("☀️ Digest now", "g"), _btn("⚙️ Status", "s")],
-          [_btn("🔕 Mute 2h", "u"), _btn("🔔 Unmute", "U")]]
+          [_btn("⚙️ Settings", "P"), _btn("🔕 Mute 2h", "u"), _btn("🔔 Unmute", "U")]]
     return "<b>Iris</b> — what would you like to see?", {"inline_keyboard": kb}
 
 
@@ -253,6 +253,7 @@ COMMANDS = [
     ("here", "Where Iris thinks you are (share live location to start)"),
     ("trip", "Watch a destination: /trip Lisbon 3"),
     ("digest", "Send the digest now"),
+    ("prefs", "Your settings — or just write what you want changed"),
     ("mute", "Only critical alerts for a while: /mute 2h"),
     ("unmute", "End mute"),
     ("locations", "Watched places"),

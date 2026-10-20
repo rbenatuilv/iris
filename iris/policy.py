@@ -35,7 +35,15 @@ def distance_to_me(ev: Event, cfg: Config) -> float | None:
 
 
 def evaluate(ev: Event, cfg: Config, now: datetime | None = None) -> tuple[str, str]:
-    """Return (level, reason)."""
+    """Return (level, reason): the rules below, then your plain-text sensitivity settings (prefs.py)."""
+    level, reason = _evaluate(ev, cfg, now)
+    if getattr(cfg, "prefs", None):
+        from .prefs import apply_sensitivity
+        level, reason = apply_sensitivity(level, reason, ev, cfg)
+    return level, reason
+
+
+def _evaluate(ev: Event, cfg: Config, now: datetime | None = None) -> tuple[str, str]:
     now = now or datetime.now(timezone.utc)
     if not ev.ongoing and ev.time < now - timedelta(hours=cfg.get("max_event_age_hours", 6)):
         return "none", "too old"
