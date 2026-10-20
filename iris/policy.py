@@ -118,8 +118,12 @@ def evaluate(ev: Event, cfg: Config, now: datetime | None = None) -> tuple[str, 
                 reason = f"{reason} · {fmt_km(dme)} from you".strip(" ·")
         if d_.get("world_significant"):
             nw = cfg.get("news_world", {})
+            # world news only: a reported death toll sets a minimum severity (the model sometimes under-rates:
+            # "160 killed" came in as 4), using the scale's own definitions: 3+ dead = 4, dozens = 5
+            deaths = int(d_.get("deaths") or 0)
+            wsev = max(sev, 5 if deaths >= 20 else 4 if deaths >= 3 else 0)
             for lvl in ("high", "info"):
-                if lvl in nw and sev >= nw[lvl]:
+                if lvl in nw and wsev >= nw[lvl]:
                     consider(lvl, f"{d_.get('place') or 'world'} (world)")
                     break
         # Never alert on news that has not been verified
@@ -182,7 +186,15 @@ def format_alert(ev: Event, level: str, reason: str, cfg: Config, event_id: int,
             lines.append(e(d_["summary"]))
         place = d_.get("place") or ""
         lines.append("📍 " + e(place + (" — " if place and reason else "") + (reason or "")))
-        lines.append("🕒 " + _fmt_time(ev, cfg, reason))
+        age_h = (datetime.now(timezone.utc) - ev.time).total_seconds() / 3600
+        latest = d_.get("latest_report")
+        if age_h >= 2 and latest:
+            # the story crossed the alert threshold later than its first report: say so
+            lr = datetime.fromtimestamp(latest, timezone.utc).astimezone(cfg.tz)
+            lines.append(f"🕒 First reported {_fmt_time(ev, cfg, reason).replace(' your time', '')} ({age_h:.0f} h ago)"
+                         f" · latest report {lr:%a %d %H:%M}")
+        else:
+            lines.append("🕒 " + _fmt_time(ev, cfg, reason))
         n = max(d_.get("n_sources", len(ev.sources)), d_.get("independent_sources") or 0)
         status = "✅ Confirmed" if d_.get("verified") == "confirmed" else "⚠️ Unconfirmed"
         if d_.get("official"):

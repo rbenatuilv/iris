@@ -142,3 +142,51 @@ def test_real_escalation_still_sends_update(cfg):
         return orig(request)
     app, sent = cycles(cfg, call, [night, later])
     assert len(sent) == 2 and "UPDATE" in sent[1] and "CRITICAL" in sent[1] and "#E1" in sent[1], sent
+
+
+def test_sudan_night_replay(cfg):
+    """Real case, 19-20 Oct: Al Jazeera 23:38 'sev 4, not world-significant' hid the story until BBC at 16:24.
+    Now the death toll makes it world news at once; at night it's held for the morning digest; BBC later adds no ping."""
+    from datetime import datetime, timedelta, timezone
+    cfg.raw["quiet_hours"] = {"start": "00:00", "end": "23:59"}            # it's night
+    cfg.raw["news"]["feeds"] = [{"id": "aljazeera", "url": "https://ansa.test/rss", "lang": "en", "scope": "world"},
+                                {"id": "bbc_world", "url": "https://giorno.test/rss", "lang": "en", "scope": "world"}]
+    claude = Scripted()
+    sudan = {"relevant": True, "category": "conflict", "title_en": "160 reported killed in drone attacks across Sudan",
+             "summary_en": "Escalating drone strikes across Sudan", "place": "Sudan", "country": "SD",
+             "lat": 15.5, "lon": 32.5, "precision": "region", "severity": 4, "world_significant": False,
+             "deaths_reported": 160}
+    claude.triage = {"sudan": sudan}
+    claude.verdict_extra = {"category": "conflict", "title": "Drone strikes kill 160 across Sudan", "country": "SD",
+                            "place": "Sudan", "lat": 15.5, "lon": 32.5, "severity": 4, "deaths_reported": 160}
+    night = {"https://ansa.test/rss": rss([("160 reported killed in drone attacks across Sudan", "https://aj/1", "", 11)]),
+             "https://giorno.test/rss": rss([])}
+    app, sent = cycles(cfg, claude, [night])
+    assert sent == []                                                        # night: no ping…
+    digest = app.build_digest()
+    assert "Held overnight" in digest and "Sudan" in digest                  # …but top of the morning digest
+
+
+def test_sudan_daytime_alerts_immediately_and_late_timing_is_honest(cfg):
+    from datetime import datetime, timedelta, timezone
+    from iris import policy
+    from iris.models import Event
+    cfg.raw["news"]["feeds"] = [{"id": "aljazeera", "url": "https://ansa.test/rss", "lang": "en", "scope": "world"},
+                                {"id": "bbc_world", "url": "https://giorno.test/rss", "lang": "en", "scope": "world"}]
+    claude = Scripted()
+    claude.triage = {"sudan": {"relevant": True, "category": "conflict", "title_en": "160 killed in Sudan drone attacks",
+                               "summary_en": "Drone strikes", "place": "Sudan", "country": "SD", "lat": 15.5, "lon": 32.5,
+                               "precision": "region", "severity": 4, "world_significant": False, "deaths_reported": 160}}
+    claude.verdict_extra = {"category": "conflict", "title": "Drone strikes kill 160 across Sudan", "country": "SD",
+                            "place": "Sudan", "lat": 15.5, "lon": 32.5, "severity": 4}
+    feeds = {"https://ansa.test/rss": rss([("160 killed in Sudan drone attacks", "https://aj/1", "", 11)]),
+             "https://giorno.test/rss": rss([])}
+    app, sent = cycles(cfg, claude, [feeds])
+    assert len(sent) == 1 and "HIGH · Conflict" in sent[0] and "(world)" in sent[0]
+    # a story first reported 17 h ago that only now crosses the threshold says so
+    now = datetime.now(timezone.utc)
+    ev = Event(key="news:9", kind="news", title="t", time=now - timedelta(hours=17), lat=15.5, lon=32.5,
+               details={"severity": 5, "world_significant": True, "verified": "confirmed", "country": "SD",
+                        "latest_report": (now - timedelta(minutes=10)).timestamp()})
+    text = policy.format_alert(ev, "high", "Sudan (world)", cfg, 68)
+    assert "First reported" in text and "(17 h ago)" in text and "latest report" in text

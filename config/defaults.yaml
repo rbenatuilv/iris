@@ -71,7 +71,7 @@ profiles:
 # News elsewhere in the same country as one of your locations
 news_country: {high: 5, info: 4}
 # News anywhere in the world (only items rated world-significant)
-news_world: {high: 5, info: 4}
+news_world: {high: 5, info: 4, min_deaths: 100}   # 100+ reported deaths always counts as world-significant
 
 world:
   quake: {high: 7.0, info: 6.2}

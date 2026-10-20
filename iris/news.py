@@ -236,8 +236,10 @@ For relevant items fill every field, in ENGLISH:
   3 significant (killing, large fire, protest with clashes or looting, city-wide strike or metro shutdown, large blackout)
   4 major (3+ dead in one incident, terror attack, riots across a city, state of emergency, mass evacuation)
   5 catastrophic (dozens dead, national emergency, war reaching the country)
-- world_significant: true only for a top global headline with broad international impact (major war escalation,
-  terror attack in a major city, disaster with 100+ dead, pandemic-level outbreak, nuclear/industrial catastrophe).
+- world_significant: true for a top global headline with broad international impact: major war escalation,
+  attacks killing many civilians (INCLUDING in long-running wars: "ongoing" is not a reason to say false),
+  terror attack in a major city, disaster with 100+ dead, pandemic-level outbreak, nuclear/industrial catastrophe.
+- deaths_reported: the number of deaths the item reports for this event (total so far), or null if none stated.
 - event_time: ISO time if stated, else null."""
 
 TRIAGE_SCHEMA = {
@@ -252,7 +254,8 @@ TRIAGE_SCHEMA = {
             "lat": {"type": ["number", "null"]}, "lon": {"type": ["number", "null"]},
             "precision": {"type": "string", "enum": ["street", "neighbourhood", "city", "region"]},
             "severity": {"type": "integer", "minimum": 0, "maximum": 5},
-            "world_significant": {"type": "boolean"}, "event_time": {"type": ["string", "null"]}},
+            "world_significant": {"type": "boolean"}, "deaths_reported": {"type": ["integer", "null"]},
+            "event_time": {"type": ["string", "null"]}},
         "required": ["id", "relevant"]}}},
     "required": ["items"]}
 
@@ -289,6 +292,7 @@ VERIFY_SCHEMA = {
         "lat": {"type": ["number", "null"]}, "lon": {"type": ["number", "null"]},
         "precision": {"type": "string", "enum": ["street", "neighbourhood", "city", "region"]},
         "independent_sources": {"type": "integer"}, "still_ongoing": {"type": "boolean"},
+        "world_significant": {"type": "boolean"}, "deaths_reported": {"type": ["integer", "null"]},
         "same_story_as": {"type": ["integer", "null"]}, "new_development": {"type": "boolean"},
         "reasoning": {"type": "string"}},
     "required": ["status", "severity", "title", "summary", "still_ongoing", "reasoning"]}
@@ -500,7 +504,7 @@ class NewsPipeline:
                     self.store.kv_set(f"escalate:{best['id']}", max(prev, int(t.get("severity") or 0)))
                 self.db.execute("UPDATE news_clusters SET tokens=?, severity=?, world_significant=?, last_update=? WHERE id=?",
                                 (json.dumps(sorted(merged)[:300]), sev,
-                                 int(bool(best["world_significant"]) or bool(t.get("world_significant"))), now, cid))
+                                 int(bool(best["world_significant"]) or self.is_world(t)), now, cid))
                 if lat is not None and PRECISION.get(t.get("precision"), 9) < PRECISION.get(best["precision"], 9):
                     # this report pins the place down better ("in via Padova" vs "in Milan")
                     self.db.execute("UPDATE news_clusters SET lat=?, lon=?, place=?, precision=? WHERE id=?",
@@ -511,7 +515,7 @@ class NewsPipeline:
                     "first_seen,first_published,last_update,tokens,precision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (cat, t.get("title_en", r["title"]), t.get("summary_en", ""), t.get("place", ""),
                      (t.get("country") or "").upper(), lat, lon, t.get("severity") or 1,
-                     int(bool(t.get("world_significant"))), now, r["published"] or now, now, json.dumps(sorted(toks)),
+                     int(self.is_world(t)), now, r["published"] or now, now, json.dumps(sorted(toks)),
                      t.get("precision")))
                 cid = cur.lastrowid
             self.db.execute("UPDATE news_items SET cluster=? WHERE id=?", (cid, r["id"]))
@@ -519,6 +523,23 @@ class NewsPipeline:
         return changed
 
     # ------------------------------------------------------------ events
+    def is_world(self, t: dict) -> bool:
+        """World-significant: the model's judgement, OR a hard death toll (judgements vary between articles:
+        the same Sudan attack was 'not significant' in one article and 'significant' in the next)."""
+        min_deaths = int((self.cfg.get("news_world") or {}).get("min_deaths", 100))
+        try:
+            deaths = int(t.get("deaths_reported") or 0)
+        except (TypeError, ValueError):
+            deaths = 0
+        return bool(t.get("world_significant")) or deaths >= min_deaths
+
+    @staticmethod
+    def _deaths(item) -> int:
+        try:
+            return int(json.loads(item["triage"] or "{}").get("deaths_reported") or 0)
+        except (TypeError, ValueError):
+            return 0
+
     def cluster_items(self, cid: int):
         return self.db.execute("SELECT * FROM news_items WHERE cluster=? ORDER BY published", (cid,)).fetchall()
 
@@ -537,6 +558,8 @@ class NewsPipeline:
                               "links": dict(list(domains.items())[:5]), "cluster": cid,
                               "ended": bool(c["ended"]), "independent_sources": c["indep"] or 0,
                               "precision": c["precision"],
+                              "latest_report": max((it["published"] or 0) for it in items) if items else None,
+                              "deaths": max([self._deaths(it) for it in items] + [0]),
                               "official": sorted({self.official[it["feed"]] for it in items if it["feed"] in self.official})})
 
     def _already_reported(self, c) -> list:
@@ -616,6 +639,8 @@ class NewsPipeline:
                      v.get("summary") or target["summary"], v.get("what_to_do") or "",
                      0 if v.get("still_ongoing", True) else 1, int(v.get("independent_sources") or 0), same))
             return same
+        if v.get("status") == "confirmed" and self.is_world(v):
+            self.db.execute("UPDATE news_clusters SET world_significant=1 WHERE id=?", (cid,))
         self.db.execute(
             "UPDATE news_clusters SET ended=?, indep=? WHERE id=?",
             (0 if v.get("still_ongoing", True) else 1, int(v.get("independent_sources") or 0), cid))
