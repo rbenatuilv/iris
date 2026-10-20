@@ -101,6 +101,10 @@ def _evaluate(ev: Event, cfg: Config, now: datetime | None = None) -> tuple[str,
             prof = cfg.profile(loc.profile)
             th = prof.get("news", {})
             if d <= prof.get("news_radius_km", 30):
+                # per-category floor, e.g. Chile: a single crime only counts if it is significant
+                floor = (prof.get("news_min_severity") or {}).get(d_.get("category"), 0)
+                if sev < floor:
+                    continue
                 where = "in " + loc.name if d < 8 else f"{d:.0f} km from {loc.name}"
                 for lvl in ("critical", "high", "info"):
                     if lvl in th and sev >= th[lvl]:

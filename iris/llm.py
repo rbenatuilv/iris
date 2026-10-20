@@ -30,6 +30,9 @@ class BudgetExceeded(RuntimeError):
     pass
 
 
+DIGEST_RESERVE_USD = 0.01
+
+
 class LLMError(RuntimeError):
     pass
 
@@ -110,7 +113,8 @@ class LLM:
         """One logical request. Handles pause_turn continuation for server tools. Returns final response."""
         if not self.enabled:
             raise LLMError("no ANTHROPIC_API_KEY configured")
-        if self.budget_left() <= 0:
+        # the morning digest keeps a small reserve so a busy news night can't take away its summary
+        if self.budget_left() <= (-DIGEST_RESERVE_USD if purpose == "digest" else 0):
             raise BudgetExceeded(f"daily LLM budget ${self.daily_budget:.2f} reached")
         all_tools = list(tools or [])
         if search and self.web_search:

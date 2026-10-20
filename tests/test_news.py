@@ -86,6 +86,9 @@ class FakeClaude:
                 "summary": "A protest turned violent; several shops were looted. Police are clearing the area.",
                 "what_to_do": "Avoid Duomo and Corso Vittorio Emanuele tonight.", "place": "Corso Vittorio Emanuele, Milan",
                 "country": "IT", "lat": 45.4651, "lon": 9.1942, "independent_sources": 2, "reasoning": "ok"}}]
+        elif "record_digest" in tool_names:
+            content = [{"type": "tool_use", "id": "t3", "name": "record_digest",
+                        "input": {"overview": "Quiet night overall.", "groups": []}}]
         else:
             content = [{"type": "text", "text": "Quiet night overall."}]
         return httpx.Response(200, json={"content": content, "stop_reason": "tool_use", "usage": usage})

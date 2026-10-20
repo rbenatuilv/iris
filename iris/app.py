@@ -15,7 +15,7 @@ import httpx
 
 from . import __version__
 from .collectors import civic, dpc, feeds, quakes
-from . import backup
+from . import backup, digest
 from .config import Config
 from .llm import LLM, BudgetExceeded, LLMError
 from .models import Event, level_rank, max_level
@@ -246,22 +246,6 @@ class Iris:
                "earthquake, tsunami and weather alerts keep working.")
         await self.deliver_text("system:budget", "high", msg, msg)
 
-    async def digest_overview(self, rows) -> str:
-        if not rows or not self.llm.enabled or not (self.cfg.get("llm") or {}).get("digest_overview", True):
-            return ""
-        plain = "\n".join(re.sub(r"<[^>]+>", "", r["text"]) for r in rows)[:6000]
-        home = next((l.name for l in self.cfg.locations if l.profile == "home"), "")
-        try:
-            return await self.llm.text(
-                model=self.llm.triage_model, purpose="digest", max_tokens=250,
-                system=(f"Write a 2-3 sentence morning overview, in English, of these overnight alert items for someone "
-                        f"living in {home}. Lead with anything near {home}, then the other locations, then the world. "
-                        "Plain text, no lists, no greeting, no advice unless an item is still active nearby."),
-                user=plain)
-        except Exception as e:  # noqa: BLE001
-            log.warning("digest overview failed: %s", e)
-            return ""
-
     async def flush_outbox(self) -> None:
         outbox = self.store.kv_get("outbox", [])
         while outbox:
@@ -273,50 +257,21 @@ class Iris:
             self.store.kv_set("outbox", outbox)
 
     # ------------------------------------------------------------------ digest
-    def _digest_text(self, r) -> str:
-        """Render a digest line from the event's CURRENT data (titles/levels may have improved since)."""
-        ev = self.store.get_event(r["event_key"])
-        if ev is None:
-            return r["text"]
-        icon = {"critical": "🔴", "high": "🟠", "info": "🔵"}.get(r["level"], "•")
-        when = datetime.fromtimestamp(ev["t"], self.cfg.tz).strftime("%a %d %b %H:%M") if ev["t"] else "?"
-        line = (f"{icon} <b>{html.escape(ev['title'])}</b>\n    {html.escape(ev['reason'] or '')} · {when} · #E{ev['id']}")
-        if "(active at start)" in (r["text"] or ""):
-            line += " · active when Iris started"
-        return line
+    def build_digest(self, overview: str = "", groups: list | None = None) -> str:
+        """The digest without the AI pass (also used by `iris digest-preview` and as the fallback)."""
+        return digest.render(self, digest.collect(self), overview, groups)
 
-    def build_digest(self) -> str:
-        rows = self.store.pending_digest()
-        # one line per event, even if it was queued several times
-        seen, uniq = set(), []
-        for r in rows:
-            if r["event_key"] not in seen:
-                seen.add(r["event_key"])
-                uniq.append(r)
-        rows = uniq
-        held = [r for r in rows if r["held"]]
-        info = [r for r in rows if not r["held"]]
-        now = datetime.now(self.cfg.tz)
-        parts = [f"<b>☀️ Iris digest — {now:%a %d %b}</b>"]
-        if held:
-            parts.append("\n<b>Held overnight / while muted:</b>")
-            parts += [self._digest_text(r) for r in held]
-        if info:
-            parts.append("\n<b>For your information:</b>")
-            parts += [self._digest_text(r) for r in info[-40:]]
-            if len(info) > 40:
-                parts.append(f"…and {len(info) - 40} more (/recent)")
-        if not rows:
-            parts.append("All quiet. Nothing to report for your locations.")
-        parts.append("\n" + self.health_summary(short=True))
-        return "\n".join(parts)
+    async def compose_digest(self) -> str:
+        items = digest.collect(self)
+        overview, groups = "", []
+        try:
+            overview, groups = await digest.ai_pass(self, items)
+        except Exception as e:  # noqa: BLE001 - the digest must go out even without the AI summary
+            log.warning("digest overview/grouping failed: %s", e)
+        return digest.render(self, items, overview, groups)
 
     async def send_digest(self) -> None:
-        text = self.build_digest()
-        overview = await self.digest_overview(self.store.pending_digest())
-        if overview:
-            head, _, rest = text.partition("\n")
-            text = f"{head}\n<i>{html.escape(overview)}</i>\n{rest}"
+        text = await self.compose_digest()
         await self.tg.send(text, silent=True, markup={"inline_keyboard": [[
             ui._btn("📋 Recent 24h", ui.encode({"h": 24, "a": "all", "c": "all", "l": "0"})), ui._btn("☰ Menu", "M")]]})
         self.store.mark_digest_sent()

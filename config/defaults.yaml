@@ -67,6 +67,7 @@ profiles:
     forecast: {rain_mm: 60, gust_kmh: 90, tmax_c: 36, tmin_c: -6}
     news_radius_km: 60
     news: {critical: 5, high: 4, info: 3}
+    news_min_severity: {crime: 4}   # single crimes (one victim, one robbery) are left out; significant crime still counts
 
 # News elsewhere in the same country as one of your locations
 news_country: {high: 5, info: 4}
